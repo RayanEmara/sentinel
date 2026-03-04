@@ -60,19 +60,21 @@ final class PasteOptimizedTextView: NSTextView {
     override func insertNewline(_ sender: Any?) {
         guard let textStorage = self.textContentStorage?.textStorage else {
             super.insertNewline(sender)
+            clearCenteredTypingAttributes()
             return
         }
 
-        let cursor = selectedRange().location
-        let text = textStorage.string as NSString
-        guard cursor > 0 else {
+        let cursorBefore = selectedRange().location
+        let textBefore = textStorage.string as NSString
+        guard cursorBefore > 0 else {
             super.insertNewline(sender)
+            clearCenteredTypingAttributes()
             return
         }
         
-        let previousCharIdx = cursor - 1
-        let lineRange = text.lineRange(for: NSRange(location: previousCharIdx, length: 0))
-        let line = text.substring(with: lineRange)
+        let previousCharIdx = cursorBefore - 1
+        let lineRange = textBefore.lineRange(for: NSRange(location: previousCharIdx, length: 0))
+        let line = textBefore.substring(with: lineRange)
         
         // Regex for unordered (*, -) and ordered (1., 2.) lists with leading spaces
         let listRegex = try! NSRegularExpression(pattern: #"^([ \t]*)([-*]|\d+\.)[ \t]+"#)
@@ -125,6 +127,7 @@ final class PasteOptimizedTextView: NSTextView {
                 
                 // Fallback to inserting the standard \n
                 super.insertNewline(sender)
+                clearCenteredTypingAttributes()
                 return 
             }
             
@@ -132,15 +135,29 @@ final class PasteOptimizedTextView: NSTextView {
             super.insertNewline(sender)
             let newCursor = selectedRange().location
             insertText(cleanPrefix, replacementRange: NSRange(location: newCursor, length: 0))
+            clearCenteredTypingAttributes()
             return
         }
 
         super.insertNewline(sender)
+        clearCenteredTypingAttributes()
     }
 
     override func insertNewlineIgnoringFieldEditor(_ sender: Any?) {
         // Shift-Enter always performs a normal line break without list continuation
         super.insertNewline(sender)
+        clearCenteredTypingAttributes()
+    }
+    
+    private func clearCenteredTypingAttributes() {
+        // NSTextView natively pulls the paragraph style of the preceding character when creating a new line.
+        // If we hit enter at the end of a centered math block, the new empty line inherits that centering.
+        // We intercept it immediately after the insertion and force the typing attributes back to default.
+        var attrs = self.typingAttributes
+        if let pStyle = attrs[.paragraphStyle] as? NSParagraphStyle, pStyle.alignment == .center {
+            attrs[.paragraphStyle] = NSParagraphStyle.default
+            self.typingAttributes = attrs
+        }
     }
 
     override func pasteAsRichText(_ sender: Any?) {

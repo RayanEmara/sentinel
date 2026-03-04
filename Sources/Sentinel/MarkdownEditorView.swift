@@ -80,6 +80,15 @@ struct MarkdownEditorView: NSViewRepresentable {
             textView.window?.makeFirstResponder(textView)
         }
 
+        // ── Layout observing ──
+        textView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.frameDidChange(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: textView
+        )
+
         return scrollView
     }
 
@@ -141,6 +150,26 @@ struct MarkdownEditorView: NSViewRepresentable {
             // 100ms debounce: catches pauses in scrolling to render without burning battery over 120hz frame updates
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
         }
+        
+        @objc func frameDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            
+            // Re-calculate margins to keep a readable line length on large screens
+            let maxWidth: CGFloat = 800
+            let currentWidth = textView.bounds.width
+            
+            var horizontalInset: CGFloat = 20
+            if currentWidth > maxWidth {
+                // Center the text column
+                horizontalInset = (currentWidth - maxWidth) / 2.0
+            }
+            
+            // Apply only if changed to avoid relayout loops
+            let currentInset = textView.textContainerInset
+            if currentInset.width != horizontalInset {
+                textView.textContainerInset = NSSize(width: horizontalInset, height: 20)
+            }
+        }
 
         func textDidChange(_ notification: Notification) {
             mathManager.textDidChange()
@@ -149,6 +178,8 @@ struct MarkdownEditorView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            
+            updateTypingAttributes(for: textView)
 
             selectionDebounceWorkItem?.cancel()
             
@@ -161,6 +192,58 @@ struct MarkdownEditorView: NSViewRepresentable {
             selectionDebounceWorkItem = workItem
             // Debounce click-drag and programmatic string replacements to prevent GCD spam
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
+        }
+        
+        private func updateTypingAttributes(for textView: NSTextView) {
+            guard let textStorage = textView.textStorage else { return }
+            let selectedRange = textView.selectedRange()
+            let cursor = selectedRange.location
+            let length = textStorage.length
+            
+            // Limit to plain insertion cursors to avoid unnecessary work during large selection formatting
+            guard selectedRange.length == 0 else { return }
+            
+            let mathRegex = try! NSRegularExpression(pattern: #"\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$"#, options: [])
+            
+            let searchStart = max(0, cursor - 2000)
+            let searchEnd = min(length, cursor + 2000)
+            let searchRange = NSRange(location: searchStart, length: searchEnd - searchStart)
+            
+            var insideMath = false
+            mathRegex.enumerateMatches(in: textStorage.string, options: [], range: searchRange) { match, _, stop in
+                guard let matchRange = match?.range else { return }
+                // Cursor must be strictly inside the bounds of the math block to get monospace.
+                // e.g. typing at the physical end of a math block should default to normal font.
+                if cursor > matchRange.location && cursor < NSMaxRange(matchRange) {
+                    insideMath = true
+                    stop.pointee = true
+                }
+            }
+            
+            let baseSize = CGFloat(markdownManager.baseFontSize)
+            let defaultFont = NSFont.systemFont(ofSize: baseSize, weight: .regular)
+            let mathFont = NSFont.monospacedSystemFont(ofSize: max(10, baseSize - 1), weight: .regular)
+            
+            let targetFont = insideMath ? mathFont : defaultFont
+            
+            var currentAttributes = textView.typingAttributes
+            var changed = false
+            
+            if currentAttributes[.font] as? NSFont != targetFont {
+                currentAttributes[.font] = targetFont
+                changed = true
+            }
+            
+            if !insideMath {
+                if let pStyle = currentAttributes[.paragraphStyle] as? NSParagraphStyle, pStyle.alignment == .center {
+                    currentAttributes[.paragraphStyle] = NSParagraphStyle.default
+                    changed = true
+                }
+            }
+            
+            if changed {
+                textView.typingAttributes = currentAttributes
+            }
         }
     }
 }
