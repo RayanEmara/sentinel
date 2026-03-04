@@ -83,73 +83,110 @@ final class PasteOptimizedTextView: NSTextView {
         }
     }
 
-    /// Wraps the current selection (or word under cursor) with `delimiter`.
+    /// Toggles `delimiter` around the current selection or word under cursor.
     ///
-    /// Three modes:
-    /// 1. **Selection exists** → wrap selection
-    /// 2. **Cursor inside/at-end of a word** → wrap that word
-    /// 3. **Empty space** → insert paired delimiters with cursor between them
+    /// - Already wrapped → removes the delimiters (toggle OFF)
+    /// - Not wrapped     → adds the delimiters   (toggle ON)
+    ///
+    /// For single-char delimiters (`*`, `$`) we verify the surrounding chars
+    /// aren't part of the double-char variant (`**`, `$$`).
     private func wrapWithDelimiter(_ delimiter: String) {
         guard let textStorage = self.textContentStorage?.textStorage else { return }
 
         let sel = selectedRange()
         let nsString = textStorage.string as NSString
         let total = nsString.length
+        let dLen = (delimiter as NSString).length        // delimiter length in UTF-16
 
         if sel.length > 0 {
-            // --- Mode 1: Wrap the selection ---
-            let selected = nsString.substring(with: sel)
-            let wrapped = delimiter + selected + delimiter
-            insertText(wrapped, replacementRange: sel)
-            // Place cursor at the end of the wrapped text
-            let newPos = sel.location + wrapped.utf16.count
-            setSelectedRange(NSRange(location: newPos, length: 0))
+            // --- Mode 1: Selection ---
+            if isWrapped(nsString, start: sel.location, end: NSMaxRange(sel), delimiter: delimiter, total: total) {
+                // UNWRAP — remove outer delimiters, keep inner text
+                let fullRange = NSRange(location: sel.location - dLen, length: sel.length + dLen * 2)
+                let inner = nsString.substring(with: sel)
+                insertText(inner, replacementRange: fullRange)
+                setSelectedRange(NSRange(location: sel.location - dLen, length: sel.length))
+            } else {
+                // WRAP
+                let selected = nsString.substring(with: sel)
+                let wrapped = delimiter + selected + delimiter
+                insertText(wrapped, replacementRange: sel)
+                let newPos = sel.location + wrapped.utf16.count
+                setSelectedRange(NSRange(location: newPos, length: 0))
+            }
             return
         }
 
-        // --- Mode 2: Try to find the word the cursor is inside / at the end of ---
+        // --- Mode 2: Word under cursor ---
         let cursor = sel.location
 
-        // Expand left from cursor to find word start
         var wordStart = cursor
         while wordStart > 0 {
             let ch = nsString.character(at: wordStart - 1)
             guard let scalar = Unicode.Scalar(ch) else { break }
             if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
                 wordStart -= 1
-            } else {
-                break
-            }
+            } else { break }
         }
 
-        // Expand right from cursor to find word end
         var wordEnd = cursor
         while wordEnd < total {
             let ch = nsString.character(at: wordEnd)
             guard let scalar = Unicode.Scalar(ch) else { break }
             if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
                 wordEnd += 1
-            } else {
-                break
-            }
+            } else { break }
         }
 
         if wordStart < wordEnd {
-            // Found a word — wrap it
-            let wordRange = NSRange(location: wordStart, length: wordEnd - wordStart)
-            let word = nsString.substring(with: wordRange)
-            let wrapped = delimiter + word + delimiter
-            insertText(wrapped, replacementRange: wordRange)
-            let newPos = wordStart + wrapped.utf16.count
-            setSelectedRange(NSRange(location: newPos, length: 0))
+            if isWrapped(nsString, start: wordStart, end: wordEnd, delimiter: delimiter, total: total) {
+                // UNWRAP
+                let fullRange = NSRange(location: wordStart - dLen, length: (wordEnd - wordStart) + dLen * 2)
+                let word = nsString.substring(with: NSRange(location: wordStart, length: wordEnd - wordStart))
+                insertText(word, replacementRange: fullRange)
+                setSelectedRange(NSRange(location: max(0, cursor - dLen), length: 0))
+            } else {
+                // WRAP
+                let wordRange = NSRange(location: wordStart, length: wordEnd - wordStart)
+                let word = nsString.substring(with: wordRange)
+                let wrapped = delimiter + word + delimiter
+                insertText(wrapped, replacementRange: wordRange)
+                setSelectedRange(NSRange(location: wordStart + wrapped.utf16.count, length: 0))
+            }
         } else {
             // --- Mode 3: No word — insert empty delimiters ---
             let paired = delimiter + delimiter
             insertText(paired, replacementRange: sel)
-            // Place cursor between the delimiters
-            let midPos = cursor + (delimiter as NSString).length
-            setSelectedRange(NSRange(location: midPos, length: 0))
+            setSelectedRange(NSRange(location: cursor + dLen, length: 0))
         }
+    }
+
+    /// Returns `true` when the text region `[start, end)` is immediately
+    /// surrounded by `delimiter` on both sides.
+    ///
+    /// For single-char delimiters (`*`, `$`) the check also verifies
+    /// that no additional delimiter char sits just outside — which would
+    /// indicate the double-char variant (`**`, `$$`) instead.
+    private func isWrapped(_ nsString: NSString, start: Int, end: Int, delimiter: String, total: Int) -> Bool {
+        let dLen = (delimiter as NSString).length
+        guard start >= dLen, end + dLen <= total else { return false }
+
+        let leading  = nsString.substring(with: NSRange(location: start - dLen, length: dLen))
+        let trailing = nsString.substring(with: NSRange(location: end, length: dLen))
+        guard leading == delimiter && trailing == delimiter else { return false }
+
+        // Disambiguate single-char from double-char variants (* vs **, $ vs $$)
+        if dLen == 1 {
+            let extraBefore = (start - dLen - 1 >= 0)
+                ? nsString.substring(with: NSRange(location: start - dLen - 1, length: 1))
+                : ""
+            let extraAfter = (end + dLen < total)
+                ? nsString.substring(with: NSRange(location: end + dLen, length: 1))
+                : ""
+            if extraBefore == delimiter || extraAfter == delimiter { return false }
+        }
+
+        return true
     }
 
     // MARK: - Optimised Paste
