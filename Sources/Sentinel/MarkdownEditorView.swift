@@ -34,7 +34,7 @@ struct MarkdownEditorView: NSViewRepresentable {
         textView.isRichText = true
         
         textView.allowsUndo = true
-        textView.usesFindBar = true
+        textView.usesFindBar = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -129,9 +129,14 @@ struct MarkdownEditorView: NSViewRepresentable {
         var lastLoadGeneration: Int = -1
         private var scrollDebounceWorkItem: DispatchWorkItem?
         private var selectionDebounceWorkItem: DispatchWorkItem?
+        private static let mathRegex = try! NSRegularExpression(pattern: #"\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$"#, options: [])
 
         init(document: MarkdownDocument) {
             self.document = document
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
         }
         
         @objc func boundsDidChange(_ notification: Notification) {
@@ -203,14 +208,12 @@ struct MarkdownEditorView: NSViewRepresentable {
             // Limit to plain insertion cursors to avoid unnecessary work during large selection formatting
             guard selectedRange.length == 0 else { return }
             
-            let mathRegex = try! NSRegularExpression(pattern: #"\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$"#, options: [])
-            
             let searchStart = max(0, cursor - 2000)
             let searchEnd = min(length, cursor + 2000)
             let searchRange = NSRange(location: searchStart, length: searchEnd - searchStart)
             
             var insideMath = false
-            mathRegex.enumerateMatches(in: textStorage.string, options: [], range: searchRange) { match, _, stop in
+            Self.mathRegex.enumerateMatches(in: textStorage.string, options: [], range: searchRange) { match, _, stop in
                 guard let matchRange = match?.range else { return }
                 // Cursor must be strictly inside the bounds of the math block to get monospace.
                 // e.g. typing at the physical end of a math block should default to normal font.

@@ -25,6 +25,8 @@ class MathTextAttachmentCell: NSTextAttachmentCell {
 /// Renders a LaTeX string into an `NSImage` using SwiftMath.
 enum MathRenderer {
 
+    private static let oversetRegex = try! NSRegularExpression(pattern: #"\\overset\{[^\}]*\}\{([^\}]*)\}"#, options: [])
+
     private static func preprocessLaTeX(_ latex: String) -> String {
         var processed = latex
         // SwiftMath is extremely strict and lacks generic negation commands
@@ -35,7 +37,6 @@ enum MathRenderer {
         processed = processed.replacingOccurrences(of: "\\not", with: "\\neq ")
         
         // SwiftMath lacks \overset support. Regex strip \overset{A}{B} -> B
-        let oversetRegex = try! NSRegularExpression(pattern: #"\\overset\{[^\}]*\}\{([^\}]*)\}"#, options: [])
         processed = oversetRegex.stringByReplacingMatches(
             in: processed,
             range: NSRange(processed.startIndex..., in: processed),
@@ -64,24 +65,13 @@ enum MathRenderer {
 
         // On macOS, SwiftMath overrides `fittingSize`, NOT `intrinsicContentSize`
         let size = label.fittingSize
-        guard size.width > 0, size.height > 0 else {
-            print("[MathRenderer] FAILED: fittingSize is \(size)")
-            if let error = label.error {
-                print("[MathRenderer] SwiftMath Parsing Error: \(error.localizedDescription)")
-            } else {
-                print("[MathRenderer] No explicit parsing error thrown, syntax might be valid but size is 0.")
-            }
-            return nil
-        }
+        guard size.width > 0, size.height > 0 else { return nil }
 
         // Resize to the exact fitting size, re-layout, then render
         label.frame = CGRect(origin: .zero, size: size)
         label.layout()
 
-        guard let bitmapRep = label.bitmapImageRepForCachingDisplay(in: label.bounds) else {
-            print("[MathRenderer] FAILED: bitmapImageRepForCachingDisplay returned nil")
-            return nil
-        }
+        guard let bitmapRep = label.bitmapImageRepForCachingDisplay(in: label.bounds) else { return nil }
         label.cacheDisplay(in: label.bounds, to: bitmapRep)
 
         let image = NSImage(size: size)
