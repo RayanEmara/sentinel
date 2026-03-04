@@ -13,6 +13,147 @@ final class PasteOptimizedTextView: NSTextView {
     /// Pastes larger than this bypass undo and batch CoreText processing.
     private static let pasteThreshold = 4096
 
+    // MARK: - Raw-Source Copy / Cut
+
+    override func copy(_ sender: Any?) {
+        guard let textStorage = self.textContentStorage?.textStorage else {
+            super.copy(sender)
+            return
+        }
+
+        let sel = selectedRange()
+        guard sel.length > 0 else { super.copy(sender); return }
+
+        // Walk the selected range and rebuild the string using raw source attributes
+        var result = ""
+        var i = sel.location
+        let end = NSMaxRange(sel)
+
+        while i < end {
+            var effectiveRange = NSRange(location: 0, length: 0)
+
+            // Math source (rendered as a single attachment character)
+            if let mathSrc = textStorage.attribute(.mathSource, at: i, effectiveRange: &effectiveRange) as? String {
+                let overlap = NSIntersectionRange(effectiveRange, sel)
+                result += mathSrc
+                i = NSMaxRange(overlap)
+                continue
+            }
+
+            // Markdown source (bold, italic, header, list)
+            if let mdSrc = textStorage.attribute(.markdownSource, at: i, effectiveRange: &effectiveRange) as? String {
+                let overlap = NSIntersectionRange(effectiveRange, sel)
+                result += mdSrc
+                i = NSMaxRange(overlap)
+                continue
+            }
+
+            // Plain text — take as-is
+            let plainEnd = min(NSMaxRange(effectiveRange), end)
+            let plainRange = NSRange(location: i, length: plainEnd - i)
+            result += (textStorage.string as NSString).substring(with: plainRange)
+            i = plainEnd
+        }
+
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(result, forType: .string)
+    }
+
+    override func cut(_ sender: Any?) {
+        copy(sender)
+        deleteBackward(sender)
+    }
+
+    // MARK: - Formatting Shortcuts (Cmd+B / I / J / K)
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command),
+              !event.modifierFlags.contains(.shift),
+              !event.modifierFlags.contains(.option) else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        switch event.charactersIgnoringModifiers {
+        case "b": wrapWithDelimiter("**"); return true
+        case "i": wrapWithDelimiter("*");  return true
+        case "j": wrapWithDelimiter("$");  return true
+        case "k": wrapWithDelimiter("$$"); return true
+        default:  return super.performKeyEquivalent(with: event)
+        }
+    }
+
+    /// Wraps the current selection (or word under cursor) with `delimiter`.
+    ///
+    /// Three modes:
+    /// 1. **Selection exists** → wrap selection
+    /// 2. **Cursor inside/at-end of a word** → wrap that word
+    /// 3. **Empty space** → insert paired delimiters with cursor between them
+    private func wrapWithDelimiter(_ delimiter: String) {
+        guard let textStorage = self.textContentStorage?.textStorage else { return }
+
+        let sel = selectedRange()
+        let nsString = textStorage.string as NSString
+        let total = nsString.length
+
+        if sel.length > 0 {
+            // --- Mode 1: Wrap the selection ---
+            let selected = nsString.substring(with: sel)
+            let wrapped = delimiter + selected + delimiter
+            insertText(wrapped, replacementRange: sel)
+            // Place cursor at the end of the wrapped text
+            let newPos = sel.location + wrapped.utf16.count
+            setSelectedRange(NSRange(location: newPos, length: 0))
+            return
+        }
+
+        // --- Mode 2: Try to find the word the cursor is inside / at the end of ---
+        let cursor = sel.location
+
+        // Expand left from cursor to find word start
+        var wordStart = cursor
+        while wordStart > 0 {
+            let ch = nsString.character(at: wordStart - 1)
+            guard let scalar = Unicode.Scalar(ch) else { break }
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                wordStart -= 1
+            } else {
+                break
+            }
+        }
+
+        // Expand right from cursor to find word end
+        var wordEnd = cursor
+        while wordEnd < total {
+            let ch = nsString.character(at: wordEnd)
+            guard let scalar = Unicode.Scalar(ch) else { break }
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" {
+                wordEnd += 1
+            } else {
+                break
+            }
+        }
+
+        if wordStart < wordEnd {
+            // Found a word — wrap it
+            let wordRange = NSRange(location: wordStart, length: wordEnd - wordStart)
+            let word = nsString.substring(with: wordRange)
+            let wrapped = delimiter + word + delimiter
+            insertText(wrapped, replacementRange: wordRange)
+            let newPos = wordStart + wrapped.utf16.count
+            setSelectedRange(NSRange(location: newPos, length: 0))
+        } else {
+            // --- Mode 3: No word — insert empty delimiters ---
+            let paired = delimiter + delimiter
+            insertText(paired, replacementRange: sel)
+            // Place cursor between the delimiters
+            let midPos = cursor + (delimiter as NSString).length
+            setSelectedRange(NSRange(location: midPos, length: 0))
+        }
+    }
+
+    // MARK: - Optimised Paste
+
     override func paste(_ sender: Any?) {
         guard let pasteboard = NSPasteboard.general.string(forType: .string) else { return }
         
