@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "Sentinel",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.4.0"),

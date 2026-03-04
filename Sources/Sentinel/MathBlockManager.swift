@@ -25,10 +25,7 @@ final class MathBlockManager {
         guard !isUpdating else { return }
 
         // Access textStorage through the TextKit 2 content manager path
-        guard let textStorage = getTextStorage(from: textView) else {
-            print("[MathBlockManager] Could not access textStorage")
-            return
-        }
+        guard let textStorage = getTextStorage(from: textView) else { return }
 
         isUpdating = true
         defer { isUpdating = false }
@@ -78,9 +75,12 @@ final class MathBlockManager {
         }
         let undoManager = textView.undoManager
         undoManager?.disableUndoRegistration()
-        for (range, attrString) in replacements.reversed() {
+        let reversed = replacements.reversed()
+        if !reversed.isEmpty {
             textStorage.beginEditing()
-            textStorage.replaceCharacters(in: range, with: attrString)
+            for (range, attrString) in reversed {
+                textStorage.replaceCharacters(in: range, with: attrString)
+            }
             textStorage.endEditing()
         }
         undoManager?.enableUndoRegistration()
@@ -130,32 +130,33 @@ final class MathBlockManager {
         let undoManager = textView.undoManager
         undoManager?.disableUndoRegistration()
 
-        // Apply reversions from end to start
-        for (location, source) in replacements.sorted(by: { $0.0 > $1.0 }) {
+        let sorted = replacements.sorted(by: { $0.0 > $1.0 })
+        if !sorted.isEmpty {
             textStorage.beginEditing()
-            let attrString = NSAttributedString(string: source, attributes: defaultAttributes)
-            textStorage.replaceCharacters(
-                in: NSRange(location: location, length: 1),
-                with: attrString
-            )
-            textStorage.endEditing()
-            print("[MathBlockManager] Reverted attachment at \(location) → \"\(source)\"")
-            
-            // Check if the cursor was on or immediately adjacent to this attachment
-            let attachmentRangeBeforeReversion = NSRange(location: location, length: 1)
-            let touched = NSIntersectionRange(selectedRange, attachmentRangeBeforeReversion).length > 0 ||
-                          selectedRange.location == location || selectedRange.location == location + 1
-            
-            if touched {
-                let prefixLen = source.hasPrefix("$$") ? 2 : 1
-                let suffixLen = source.hasSuffix("$$") ? 2 : 1
-                let innerLen = (source as NSString).length - prefixLen - suffixLen
-                if innerLen > 0 {
-                    newSelectionRange = NSRange(location: location + prefixLen, length: innerLen)
+            for (location, source) in sorted {
+                let attrString = NSAttributedString(string: source, attributes: defaultAttributes)
+                textStorage.replaceCharacters(
+                    in: NSRange(location: location, length: 1),
+                    with: attrString
+                )
+
+                // Check if the cursor was on or immediately adjacent to this attachment
+                let attachmentRangeBeforeReversion = NSRange(location: location, length: 1)
+                let touched = NSIntersectionRange(selectedRange, attachmentRangeBeforeReversion).length > 0 ||
+                              selectedRange.location == location || selectedRange.location == location + 1
+
+                if touched {
+                    let prefixLen = source.hasPrefix("$$") ? 2 : 1
+                    let suffixLen = source.hasSuffix("$$") ? 2 : 1
+                    let innerLen = (source as NSString).length - prefixLen - suffixLen
+                    if innerLen > 0 {
+                        newSelectionRange = NSRange(location: location + prefixLen, length: innerLen)
+                    }
                 }
             }
+            textStorage.endEditing()
         }
-        
+
         undoManager?.enableUndoRegistration()
         
         if let targetRange = newSelectionRange {
@@ -171,11 +172,6 @@ final class MathBlockManager {
     private func renderSourceBlocks(selectedRange: NSRange, textStorage: NSTextStorage, textView: NSTextView) {
         MemoryTracker.report(location: "MathBlockManager renderSourceBlocks start")
         let nsString = textStorage.string as NSString
-        guard nsString.contains("$") else { 
-            MemoryTracker.report(location: "MathBlockManager renderSourceBlocks end (no $)")
-            return 
-        }
-        
         let fullRange = NSRange(location: 0, length: nsString.length)
         
         // Scope our search to the visible rect if possible, plus a buffer
@@ -217,13 +213,15 @@ final class MathBlockManager {
             }
         }
         
-        for (range, attrString) in culledRanges.sorted(by: { $0.0.location > $1.0.location }) {
+        let sortedCulled = culledRanges.sorted(by: { $0.0.location > $1.0.location })
+        if !sortedCulled.isEmpty {
             textStorage.beginEditing()
-            textStorage.replaceCharacters(in: range, with: attrString)
+            for (range, attrString) in sortedCulled {
+                textStorage.replaceCharacters(in: range, with: attrString)
+            }
             textStorage.endEditing()
-            MemoryTracker.report(location: "MathBlockManager off-screen culling completed")
         }
-        
+
         undoManager?.enableUndoRegistration()
 
         var matches: [(range: NSRange, latex: String, source: String)] = []
@@ -256,18 +254,16 @@ final class MathBlockManager {
 
         undoManager?.disableUndoRegistration()
 
-        // Render from end to start to preserve character offsets
+        // Pre-build replacement pairs, then apply in a single editing session
+        var renderReplacements: [(NSRange, NSAttributedString)] = []
         for match in matches.reversed() {
             let isInline = !match.source.hasPrefix("$$")
             let renderedFontSize = isInline ? baseFontSize : baseFontSize * 1.15
-            guard let attachment = MathRenderer.attachment(for: match.latex, fontSize: renderedFontSize, inline: isInline) else {
-                print("[MathBlockManager] MathRenderer FAILED for: \"\(match.latex)\"")
-                continue
-            }
+            guard let attachment = MathRenderer.attachment(for: match.latex, fontSize: renderedFontSize, inline: isInline) else { continue }
 
             let attachmentString = NSMutableAttributedString(attachment: attachment)
             attachmentString.addAttribute(.mathSource, value: match.source, range: NSRange(location: 0, length: attachmentString.length))
-            
+
             if !isInline {
                 let paragraphStyle = NSMutableParagraphStyle()
                 paragraphStyle.alignment = .center
@@ -276,10 +272,15 @@ final class MathBlockManager {
                 attachmentString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: attachmentString.length))
             }
 
+            renderReplacements.append((match.range, attachmentString))
+        }
+
+        if !renderReplacements.isEmpty {
             textStorage.beginEditing()
-            textStorage.replaceCharacters(in: match.range, with: attachmentString)
+            for (range, attrString) in renderReplacements {
+                textStorage.replaceCharacters(in: range, with: attrString)
+            }
             textStorage.endEditing()
-            print("[MathBlockManager] Rendered: \"\(match.source)\" → attachment")
         }
         
         undoManager?.enableUndoRegistration()

@@ -18,6 +18,7 @@ final class MarkdownBlockManager {
     private static let boldRegex = try! NSRegularExpression(pattern: #"(\*\*)(.+?)(\*\*)"#, options: [])
     private static let italicRegex = try! NSRegularExpression(pattern: #"((?<!\*)\*(?!\*)|(?<!_)_(?!_))(.+?)(\1)"#, options: [])
     private static let listPrefixRegex = try! NSRegularExpression(pattern: #"^([ \t]*)([-*]|\d+\.)[ \t]+"#, options: [.anchorsMatchLines])
+    private static let mathOverlapRegex = try! NSRegularExpression(pattern: #"\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$"#, options: [])
 
     var baseFontSize: CGFloat = 15.0
     private var baseFont: NSFont { NSFont.systemFont(ofSize: baseFontSize, weight: .regular) }
@@ -63,14 +64,17 @@ final class MarkdownBlockManager {
         
         let undoManager = textView.undoManager
         undoManager?.disableUndoRegistration()
-        
-        for (range, source) in reverts.sorted(by: { $0.0.location > $1.0.location }) {
+
+        let sorted = reverts.sorted(by: { $0.0.location > $1.0.location })
+        if !sorted.isEmpty {
             textStorage.beginEditing()
-            let attrString = NSAttributedString(string: source, attributes: defaultAttributes)
-            textStorage.replaceCharacters(in: range, with: attrString)
+            for (range, source) in sorted {
+                let attrString = NSAttributedString(string: source, attributes: defaultAttributes)
+                textStorage.replaceCharacters(in: range, with: attrString)
+            }
             textStorage.endEditing()
         }
-        
+
         undoManager?.enableUndoRegistration()
         
         // Re-render blocks with new font sizes
@@ -121,14 +125,16 @@ final class MarkdownBlockManager {
         let undoManager = textView.undoManager
         undoManager?.disableUndoRegistration()
 
-        // Traverse backwards so ranges don't shift
-        for (range, source) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
+        let sorted = replacements.sorted(by: { $0.0.location > $1.0.location })
+        if !sorted.isEmpty {
             textStorage.beginEditing()
-            let attrString = NSAttributedString(string: source, attributes: defaultAttributes)
-            textStorage.replaceCharacters(in: range, with: attrString)
+            for (range, source) in sorted {
+                let attrString = NSAttributedString(string: source, attributes: defaultAttributes)
+                textStorage.replaceCharacters(in: range, with: attrString)
+            }
             textStorage.endEditing()
         }
-        
+
         undoManager?.enableUndoRegistration()
     }
 
@@ -169,8 +175,7 @@ final class MarkdownBlockManager {
         // Pre-compute raw math bounds so we don't accidentally parse LaTeX underscores as italics
         // when the cursor is inside a math block (which reverts it to raw text without attributes)
         var precomputedMathRanges: [NSRange] = []
-        let mathRegex = try! NSRegularExpression(pattern: #"\$\$([\s\S]+?)\$\$|\$([^\$\n]+?)\$"#, options: [])
-        mathRegex.enumerateMatches(in: textStorage.string, options: [], range: searchRange) { match, _, _ in
+        Self.mathOverlapRegex.enumerateMatches(in: textStorage.string, options: [], range: searchRange) { match, _, _ in
             if let r = match?.range { precomputedMathRanges.append(r) }
         }
 
@@ -296,13 +301,15 @@ final class MarkdownBlockManager {
         let undoManager = textView.undoManager
         undoManager?.disableUndoRegistration()
 
-        // Apply replacements backwards
-        for (range, attrString) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
+        let sorted = replacements.sorted(by: { $0.0.location > $1.0.location })
+        if !sorted.isEmpty {
             textStorage.beginEditing()
-            textStorage.replaceCharacters(in: range, with: attrString)
+            for (range, attrString) in sorted {
+                textStorage.replaceCharacters(in: range, with: attrString)
+            }
             textStorage.endEditing()
         }
-        
+
         undoManager?.enableUndoRegistration()
     }
 }

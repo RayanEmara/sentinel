@@ -12,6 +12,7 @@ final class PasteOptimizedTextView: NSTextView {
 
     /// Pastes larger than this bypass undo and batch CoreText processing.
     private static let pasteThreshold = 4096
+    private static let listRegex = try! NSRegularExpression(pattern: #"^([ \t]*)([-*]|\d+\.)[ \t]+"#)
 
     // MARK: - Raw-Source Copy / Cut
 
@@ -68,19 +69,111 @@ final class PasteOptimizedTextView: NSTextView {
     // MARK: - Formatting Shortcuts (Cmd+B / I / J / K)
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.modifierFlags.contains(.command),
-              !event.modifierFlags.contains(.shift),
-              !event.modifierFlags.contains(.option) else {
-            return super.performKeyEquivalent(with: event)
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+
+        // ── Cmd-only: formatting toggles ──
+        if flags == .command {
+            switch key {
+            case "b": wrapWithDelimiter("**"); return true
+            case "i": wrapWithDelimiter("*");  return true
+            case "j": wrapWithDelimiter("$");  return true
+            case "k": wrapWithDelimiter("$$"); return true
+            default: break
+            }
         }
 
-        switch event.charactersIgnoringModifiers {
-        case "b": wrapWithDelimiter("**"); return true
-        case "i": wrapWithDelimiter("*");  return true
-        case "j": wrapWithDelimiter("$");  return true
-        case "k": wrapWithDelimiter("$$"); return true
-        default:  return super.performKeyEquivalent(with: event)
+        // ── Cmd+Shift+V: paste image → display math $$...$$ ──
+        if flags == [.command, .shift] && key == "v" {
+            pasteImageAsLaTeX(inline: false)
+            return true
         }
+
+        // ── Cmd+Ctrl+V: paste image → inline math $...$ ──
+        if flags == [.command, .control] && key == "v" {
+            pasteImageAsLaTeX(inline: true)
+            return true
+        }
+
+        return super.performKeyEquivalent(with: event)
+    }
+
+    // MARK: - Image → LaTeX Paste
+
+    /// Reads an image from the pasteboard, sends it to SimpleTex OCR,
+    /// and inserts the recognised LaTeX wrapped in `$...$` or `$$...$$`.
+    private func pasteImageAsLaTeX(inline: Bool) {
+        let pb = NSPasteboard.general
+
+        // 1. Get image data from pasteboard
+        guard let imageData = pb.data(forType: .png) ?? tiffToPNG(pb.data(forType: .tiff)) else {
+            // No image on clipboard — beep to signal nothing happened
+            NSSound.beep()
+            return
+        }
+
+        // 2. Get token from Keychain
+        guard let token = KeychainHelper.loadToken(), !token.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "SimpleTex API Token Required"
+            alert.informativeText = "Set your token in Settings (⌘,) to enable image-to-LaTeX recognition."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            }
+            return
+        }
+
+        // 3. Insert placeholder at cursor
+        let delimiter = inline ? "$" : "$$"
+        let placeholder = "\(delimiter)\\text{recognising…}\(delimiter)"
+        let sel = selectedRange()
+        insertText(placeholder, replacementRange: sel)
+
+        // 4. Call API asynchronously
+        Task { @MainActor in
+            do {
+                let latex = try await SimpletexService.recognise(imageData: imageData, token: token)
+                let result = "\(delimiter)\(latex)\(delimiter)"
+
+                // Replace the placeholder (verify it's still there)
+                guard let textStorage = self.textContentStorage?.textStorage else { return }
+                let currentText = textStorage.string as NSString
+
+                // Find the placeholder — it may have shifted if other edits happened
+                let searchRange = NSRange(location: 0, length: currentText.length)
+                let foundRange = currentText.range(of: placeholder, range: searchRange)
+
+                if foundRange.location != NSNotFound {
+                    self.insertText(result, replacementRange: foundRange)
+                } else {
+                    // Placeholder was removed/edited — just insert at cursor
+                    self.insertText(result, replacementRange: self.selectedRange())
+                }
+            } catch {
+                // Replace placeholder with error
+                guard let textStorage = self.textContentStorage?.textStorage else { return }
+                let currentText = textStorage.string as NSString
+                let searchRange = NSRange(location: 0, length: currentText.length)
+                let foundRange = currentText.range(of: placeholder, range: searchRange)
+
+                let errorText = "% LaTeX recognition failed: \(error.localizedDescription)"
+                if foundRange.location != NSNotFound {
+                    self.insertText(errorText, replacementRange: foundRange)
+                } else {
+                    self.insertText(errorText, replacementRange: self.selectedRange())
+                }
+            }
+        }
+    }
+
+    /// Converts TIFF data to PNG for the SimpleTex API.
+    private func tiffToPNG(_ tiffData: Data?) -> Data? {
+        guard let data = tiffData,
+              let imageRep = NSBitmapImageRep(data: data) else { return nil }
+        return imageRep.representation(using: .png, properties: [:])
     }
 
     /// Toggles `delimiter` around the current selection or word under cursor.
@@ -254,8 +347,7 @@ final class PasteOptimizedTextView: NSTextView {
         let lineRange = textBefore.lineRange(for: NSRange(location: previousCharIdx, length: 0))
         let line = textBefore.substring(with: lineRange)
         
-        // Regex for unordered (*, -) and ordered (1., 2.) lists with leading spaces
-        let listRegex = try! NSRegularExpression(pattern: #"^([ \t]*)([-*]|\d+\.)[ \t]+"#)
+        let listRegex = Self.listRegex
         
         var matchPrefix: String? = nil
         var isEmptyItem = false
